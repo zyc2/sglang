@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-Query GitHub Actions job status for specific jobs.
+Query GitHub Actions job status for specific jobs or generate runner fleet reports.
 
 Usage:
+    # Per-job reports (original mode)
     python scripts/ci/query_job_status.py --job "stage-c-test-large-8-gpu-amd-mi35x"
     python scripts/ci/query_job_status.py --job "stage-c-test-large-8-gpu-amd-mi35x" --hours 48
-    python scripts/ci/query_job_status.py --job "AMD" --workflow pr-test-amd.yml
+
+    # Runner fleet report (cross-workflow runner analytics)
+    python scripts/ci/query_job_status.py --runner-report --workflow "pr-test-amd.yml,nightly-test-amd.yml" --hours 24
+    python scripts/ci/query_job_status.py --runner-report --workflow "pr-test-amd.yml,nightly-test-amd.yml,pr-test-amd-rocm720.yml,nightly-test-amd-rocm720.yml" --summary
 
 Requirements:
     pip install tabulate
@@ -229,6 +233,8 @@ def query_jobs(
                     "started_at": job.get("started_at", ""),
                     "completed_at": job.get("completed_at", ""),
                     "runner_name": runner_name,
+                    "labels": job.get("labels", []),
+                    "runner_group_name": job.get("runner_group_name") or "-",
                     "run_id": run["id"],
                     "run_status": run_status,
                     "run_conclusion": run_conclusion,
@@ -236,6 +242,100 @@ def query_jobs(
                     "branch": branch,
                     "html_url": job.get("html_url", ""),
                     "is_stuck": is_stuck,
+                }
+            )
+
+    return results
+
+
+def query_all_jobs(
+    repo: str,
+    workflows: list[str],
+    hours: int = 24,
+) -> list[dict]:
+    """Query all jobs across multiple workflows for fleet-level analysis.
+
+    Unlike query_jobs(), this does NOT filter by job name and collects
+    everything in a single pass -- ideal for runner-centric analytics.
+    Jobs on ubuntu-latest are excluded since those are utility jobs.
+    """
+    all_runs = []
+    for workflow in workflows:
+        print(f"Fetching runs for {workflow}...", file=sys.stderr)
+        runs = get_workflow_runs(repo, workflow, hours)
+        print(f"  Found {len(runs)} runs for {workflow}", file=sys.stderr)
+        for run in runs:
+            run["_workflow"] = workflow
+        all_runs.extend(runs)
+
+    seen_run_ids = set()
+    unique_runs = []
+    for run in all_runs:
+        if run["id"] not in seen_run_ids:
+            seen_run_ids.add(run["id"])
+            unique_runs.append(run)
+
+    print(f"Total unique workflow runs: {len(unique_runs)}", file=sys.stderr)
+
+    results = []
+    total_runs = len(unique_runs)
+
+    for i, run in enumerate(unique_runs):
+        if (i + 1) % 20 == 0:
+            print(f"Processing run {i+1}/{total_runs}...", file=sys.stderr)
+
+        try:
+            jobs = get_jobs_for_run(repo, run["id"])
+        except Exception as e:
+            print(
+                f"Warning: Failed to get jobs for run {run['id']}: {e}", file=sys.stderr
+            )
+            continue
+
+        pr_number = get_pr_number_from_run(run)
+        branch = run.get("head_branch", "")
+        run_status = run.get("status", "unknown")
+        run_conclusion = run.get("conclusion") or "-"
+        workflow_name = run.get("_workflow", "-")
+
+        for job in jobs:
+            job_name = job.get("name", "")
+            job_status = job.get("status", "unknown")
+            runner_name = job.get("runner_name") or "-"
+            labels = job.get("labels", [])
+
+            if len(labels) == 1 and labels[0] == "ubuntu-latest":
+                continue
+
+            is_stuck = False
+            if job_status == "in_progress":
+                if runner_name == "-":
+                    is_stuck = True
+                elif run_status == "completed" and run_conclusion in (
+                    "cancelled",
+                    "failure",
+                ):
+                    is_stuck = True
+
+            results.append(
+                {
+                    "job_name": job_name,
+                    "status": job_status,
+                    "conclusion": job.get("conclusion") or "-",
+                    "created_at": job.get("created_at", ""),
+                    "started_at": job.get("started_at", ""),
+                    "completed_at": job.get("completed_at", ""),
+                    "runner_name": runner_name,
+                    "labels": labels,
+                    "runner_group_name": job.get("runner_group_name") or "-",
+                    "run_id": run["id"],
+                    "run_status": run_status,
+                    "run_conclusion": run_conclusion,
+                    "pr_number": pr_number,
+                    "branch": branch,
+                    "html_url": job.get("html_url", ""),
+                    "is_stuck": is_stuck,
+                    "workflow": workflow_name,
                 }
             )
 
@@ -318,6 +418,298 @@ def calculate_queue_time(
         minutes = minutes % 60
         return f"{hours}h{minutes}m"
     return f"{minutes}m{seconds}s"
+
+
+# ---------------------------------------------------------------------------
+# Runner fleet analytics functions
+# ---------------------------------------------------------------------------
+
+
+def _format_duration_seconds(seconds: float) -> str:
+    """Format seconds into human-readable duration string."""
+    if seconds <= 0:
+        return "-"
+    minutes = int(seconds // 60)
+    secs = int(seconds % 60)
+    if minutes >= 60:
+        hours = minutes // 60
+        minutes = minutes % 60
+        return f"{hours}h{minutes}m"
+    return f"{minutes}m{secs}s"
+
+
+def _get_runner_label(job: dict) -> str:
+    """Extract the primary runner label from a job's labels list."""
+    labels = job.get("labels", [])
+    if not labels:
+        return "unknown"
+    for label in labels:
+        if label.startswith("linux-mi"):
+            return label
+    return labels[0]
+
+
+def analyze_concurrency(jobs: list[dict], report_time: datetime = None) -> dict:
+    """Analyze concurrent runner usage per runner label.
+
+    Uses an event-sweep algorithm: for each job that ran, create +1 event
+    at started_at and -1 event at completed_at, then sweep through sorted
+    events tracking the concurrent count.
+    """
+    if report_time is None:
+        report_time = datetime.now(timezone.utc)
+
+    label_jobs: dict[str, list[dict]] = {}
+    for job in jobs:
+        label = _get_runner_label(job)
+        label_jobs.setdefault(label, []).append(job)
+
+    results = {}
+    for label in sorted(label_jobs):
+        pool_jobs = label_jobs[label]
+        events: list[tuple[datetime, int]] = []
+        queue_times: list[float] = []
+        durations: list[float] = []
+
+        for job in pool_jobs:
+            started = parse_time(job.get("started_at", ""))
+            completed = parse_time(job.get("completed_at", ""))
+            created = parse_time(job.get("created_at", ""))
+
+            if started and completed:
+                events.append((started, +1))
+                events.append((completed, -1))
+                durations.append((completed - started).total_seconds())
+            elif started:
+                events.append((started, +1))
+                events.append((report_time, -1))
+                durations.append((report_time - started).total_seconds())
+
+            if created and started:
+                qt = (started - created).total_seconds()
+                if qt >= 0:
+                    queue_times.append(qt)
+
+        if not events:
+            results[label] = {
+                "peak": 0,
+                "avg_concurrent": 0.0,
+                "total_jobs": len(pool_jobs),
+                "avg_queue_seconds": 0,
+                "avg_duration_seconds": 0,
+            }
+            continue
+
+        events.sort(key=lambda x: (x[0], x[1]))
+        concurrent = 0
+        peak = 0
+        time_weighted_sum = 0.0
+        total_time = 0.0
+        prev_time = events[0][0]
+
+        for ts, delta in events:
+            if prev_time and concurrent > 0:
+                dt = (ts - prev_time).total_seconds()
+                time_weighted_sum += concurrent * dt
+                total_time += dt
+            concurrent += delta
+            peak = max(peak, concurrent)
+            prev_time = ts
+
+        avg_concurrent = time_weighted_sum / total_time if total_time > 0 else 0
+        avg_queue = sum(queue_times) / len(queue_times) if queue_times else 0
+        avg_duration = sum(durations) / len(durations) if durations else 0
+
+        results[label] = {
+            "peak": peak,
+            "avg_concurrent": round(avg_concurrent, 1),
+            "total_jobs": len(pool_jobs),
+            "avg_queue_seconds": avg_queue,
+            "avg_duration_seconds": avg_duration,
+        }
+
+    return results
+
+
+def analyze_busy_periods(jobs: list[dict]) -> list[dict]:
+    """Analyze job activity by hour of day (UTC).
+
+    Buckets jobs by the UTC hour they started and computes avg queue time.
+    Classifies each hour as Quiet / Moderate / Busy / Peak relative to the
+    busiest hour.
+    """
+    hourly: dict[int, dict] = {
+        h: {"jobs_started": 0, "queue_times": []} for h in range(24)
+    }
+
+    for job in jobs:
+        started = parse_time(job.get("started_at", ""))
+        created = parse_time(job.get("created_at", ""))
+
+        if started:
+            hour = started.astimezone(timezone.utc).hour
+            hourly[hour]["jobs_started"] += 1
+
+            if created:
+                qt = (started - created).total_seconds()
+                if qt >= 0:
+                    hourly[hour]["queue_times"].append(qt)
+
+    max_jobs = max((v["jobs_started"] for v in hourly.values()), default=1) or 1
+
+    results = []
+    for hour in range(24):
+        data = hourly[hour]
+        avg_queue = (
+            sum(data["queue_times"]) / len(data["queue_times"])
+            if data["queue_times"]
+            else 0
+        )
+        ratio = data["jobs_started"] / max_jobs
+        if ratio >= 0.75:
+            load = "Peak"
+        elif ratio >= 0.5:
+            load = "Busy"
+        elif ratio >= 0.25:
+            load = "Moderate"
+        else:
+            load = "Quiet"
+
+        results.append(
+            {
+                "hour": hour,
+                "hour_label": f"{hour:02d}:00-{(hour + 1) % 24:02d}:00",
+                "jobs_started": data["jobs_started"],
+                "avg_queue_seconds": avg_queue,
+                "load": load,
+            }
+        )
+
+    return results
+
+
+def analyze_runner_health(jobs: list[dict]) -> list[dict]:
+    """Analyze per-runner-hostname health metrics.
+
+    Returns a list sorted by failure rate (descending), showing total jobs,
+    success/failure/cancelled counts, avg duration, and the most-failed job
+    name per runner.
+    """
+    runners: dict[str, dict] = {}
+    for job in jobs:
+        runner = job.get("runner_name", "-")
+        if runner == "-":
+            continue
+
+        if runner not in runners:
+            runners[runner] = {
+                "total": 0,
+                "success": 0,
+                "failure": 0,
+                "cancelled": 0,
+                "durations": [],
+                "failed_jobs": {},
+                "labels": set(),
+            }
+
+        r = runners[runner]
+        r["total"] += 1
+
+        for lbl in job.get("labels", []):
+            r["labels"].add(lbl)
+
+        conclusion = job.get("conclusion", "-")
+        if conclusion == "success":
+            r["success"] += 1
+        elif conclusion == "failure":
+            r["failure"] += 1
+            jn = job.get("job_name", "unknown")
+            r["failed_jobs"][jn] = r["failed_jobs"].get(jn, 0) + 1
+        elif conclusion in ("cancelled", "timed_out"):
+            r["cancelled"] += 1
+
+        started = parse_time(job.get("started_at", ""))
+        completed = parse_time(job.get("completed_at", ""))
+        if started and completed:
+            r["durations"].append((completed - started).total_seconds())
+
+    results = []
+    for runner_name, data in runners.items():
+        fail_rate = data["failure"] / data["total"] * 100 if data["total"] > 0 else 0
+        avg_dur = (
+            sum(data["durations"]) / len(data["durations"]) if data["durations"] else 0
+        )
+
+        if data["failed_jobs"]:
+            most_failed = max(data["failed_jobs"].items(), key=lambda x: x[1])
+            most_failed_str = f"{most_failed[0]} ({most_failed[1]})"
+        else:
+            most_failed_str = "-"
+
+        results.append(
+            {
+                "runner_name": runner_name,
+                "total": data["total"],
+                "success": data["success"],
+                "failure": data["failure"],
+                "cancelled": data["cancelled"],
+                "fail_rate": round(fail_rate, 1),
+                "avg_duration_seconds": avg_dur,
+                "most_failed_job": most_failed_str,
+                "labels": sorted(data["labels"]),
+            }
+        )
+
+    results.sort(key=lambda x: (-x["fail_rate"], -x["total"]))
+    return results
+
+
+def analyze_queue_distribution(jobs: list[dict]) -> dict:
+    """Analyze queue time distribution with percentile stats.
+
+    Returns bucket counts and median/P90/P99 queue times.
+    """
+    queue_times: list[float] = []
+    for job in jobs:
+        created = parse_time(job.get("created_at", ""))
+        started = parse_time(job.get("started_at", ""))
+        if created and started:
+            qt = (started - created).total_seconds()
+            if qt >= 0:
+                queue_times.append(qt)
+
+    if not queue_times:
+        return {"buckets": [], "median": 0, "p90": 0, "p99": 0, "total": 0}
+
+    queue_times.sort()
+
+    def percentile(data: list[float], p: int) -> float:
+        idx = min(int(len(data) * p / 100), len(data) - 1)
+        return data[idx]
+
+    bucket_defs = [
+        ("< 1 min", 0, 60),
+        ("1-5 min", 60, 300),
+        ("5-15 min", 300, 900),
+        ("15-30 min", 900, 1800),
+        ("30-60 min", 1800, 3600),
+        ("> 60 min", 3600, float("inf")),
+    ]
+
+    total = len(queue_times)
+    buckets = []
+    for label, lo, hi in bucket_defs:
+        count = sum(1 for qt in queue_times if lo <= qt < hi)
+        pct = count / total * 100 if total > 0 else 0
+        buckets.append({"range": label, "count": count, "percentage": round(pct, 1)})
+
+    return {
+        "buckets": buckets,
+        "median": percentile(queue_times, 50),
+        "p90": percentile(queue_times, 90),
+        "p99": percentile(queue_times, 99),
+        "total": total,
+    }
 
 
 def process_results(
@@ -795,6 +1187,227 @@ def format_markdown(
     return "\n".join(lines)
 
 
+def format_runner_report_markdown(
+    jobs: list[dict],
+    workflows: list[str],
+    hours: int,
+    generated_time: str,
+    report_time: datetime = None,
+) -> str:
+    """Format runner fleet analytics as markdown for GitHub Actions summary."""
+    if report_time is None:
+        report_time = datetime.now(timezone.utc)
+
+    lines: list[str] = []
+
+    # Header
+    lines.append("# CI Runner Fleet Report")
+    lines.append("")
+    lines.append(f"**Workflows:** {', '.join(f'`{w}`' for w in workflows)}")
+    lines.append(f"**Time window:** Last {hours} hours")
+    lines.append(f"**Generated:** {generated_time} UTC")
+    lines.append(f"**Total jobs analyzed:** {len(jobs)}")
+    lines.append("")
+    lines.append("> All times are in UTC. Jobs on `ubuntu-latest` are excluded.")
+    lines.append("")
+
+    if not jobs:
+        lines.append("> No self-hosted runner jobs found in the time window.")
+        return "\n".join(lines)
+
+    # --- Fleet Overview ---
+    unique_runners = set(
+        j["runner_name"] for j in jobs if j.get("runner_name", "-") != "-"
+    )
+    completed_jobs = [j for j in jobs if j.get("status") == "completed"]
+    lines.append("## Fleet Overview")
+    lines.append("")
+    lines.append("| Metric | Value |")
+    lines.append("|--------|-------|")
+    lines.append(f"| Total unique runners seen | {len(unique_runners)} |")
+    lines.append(f"| Total jobs analyzed | {len(jobs)} |")
+    lines.append(f"| Completed jobs | {len(completed_jobs)} |")
+    lines.append(f"| Time window | {hours}h |")
+    lines.append("")
+
+    # --- Concurrency by Runner Label ---
+    concurrency = analyze_concurrency(jobs, report_time)
+    if concurrency:
+        lines.append("## Concurrency by Runner Label")
+        lines.append("")
+        lines.append(
+            "| Runner Label | Peak Concurrent | Avg Concurrent | Total Jobs | Avg Queue | Avg Duration |"
+        )
+        lines.append(
+            "|-------------|----------------|---------------|-----------|-----------|-------------|"
+        )
+        for label in sorted(concurrency, key=lambda k: -concurrency[k]["peak"]):
+            c = concurrency[label]
+            lines.append(
+                f"| `{label}` | **{c['peak']}** | {c['avg_concurrent']} "
+                f"| {c['total_jobs']} "
+                f"| {_format_duration_seconds(c['avg_queue_seconds'])} "
+                f"| {_format_duration_seconds(c['avg_duration_seconds'])} |"
+            )
+        lines.append("")
+
+    # --- Busy Periods ---
+    busy_periods = analyze_busy_periods(jobs)
+    if busy_periods:
+        lines.append("## Busy Periods (UTC)")
+        lines.append("")
+        lines.append("| Hour (UTC) | Jobs Started | Avg Queue Time | Load |")
+        lines.append("|-----------|-------------|---------------|------|")
+        for bp in busy_periods:
+            if bp["jobs_started"] == 0:
+                continue
+            load_display = (
+                f"**{bp['load']}**" if bp["load"] in ("Peak", "Busy") else bp["load"]
+            )
+            lines.append(
+                f"| {bp['hour_label']} | {bp['jobs_started']} "
+                f"| {_format_duration_seconds(bp['avg_queue_seconds'])} "
+                f"| {load_display} |"
+            )
+        lines.append("")
+
+        peak_hours = [bp for bp in busy_periods if bp["load"] == "Peak"]
+        quiet_hours = [
+            bp
+            for bp in busy_periods
+            if bp["load"] == "Quiet" and bp["jobs_started"] > 0
+        ]
+        if peak_hours:
+            labels = ", ".join(bp["hour_label"] for bp in peak_hours)
+            lines.append(f"> **Peak hours:** {labels}")
+            lines.append("")
+        if quiet_hours:
+            labels = ", ".join(bp["hour_label"] for bp in quiet_hours)
+            lines.append(f"> **Quiet hours:** {labels}")
+            lines.append("")
+
+    # --- Runner Health ---
+    runner_health = analyze_runner_health(jobs)
+    if runner_health:
+        lines.append("## Runner Health (sorted by failure rate)")
+        lines.append("")
+
+        has_failures = any(r["failure"] > 0 for r in runner_health)
+        if has_failures:
+            lines.append(
+                "| Runner Hostname | Labels | Total | Success | Failure | Cancelled | Fail Rate | Avg Duration | Most Failed Job |"
+            )
+            lines.append(
+                "|----------------|--------|-------|---------|---------|-----------|-----------|-------------|----------------|"
+            )
+        else:
+            lines.append(
+                "| Runner Hostname | Labels | Total | Success | Failure | Cancelled | Fail Rate | Avg Duration |"
+            )
+            lines.append(
+                "|----------------|--------|-------|---------|---------|-----------|-----------|-------------|"
+            )
+
+        for r in runner_health:
+            fail_rate_str = (
+                f"**{r['fail_rate']}%**" if r["fail_rate"] > 0 else f"{r['fail_rate']}%"
+            )
+            labels_str = ", ".join(f"`{l}`" for l in r["labels"][:2])
+            dur_str = _format_duration_seconds(r["avg_duration_seconds"])
+            if has_failures:
+                lines.append(
+                    f"| `{r['runner_name']}` | {labels_str} | {r['total']} "
+                    f"| {r['success']} | {r['failure']} | {r['cancelled']} "
+                    f"| {fail_rate_str} | {dur_str} | {r['most_failed_job']} |"
+                )
+            else:
+                lines.append(
+                    f"| `{r['runner_name']}` | {labels_str} | {r['total']} "
+                    f"| {r['success']} | {r['failure']} | {r['cancelled']} "
+                    f"| {fail_rate_str} | {dur_str} |"
+                )
+        lines.append("")
+
+    # --- Queue Time Distribution ---
+    queue_dist = analyze_queue_distribution(jobs)
+    if queue_dist["total"] > 0:
+        lines.append("## Queue Time Distribution")
+        lines.append("")
+        lines.append("| Queue Time Range | Count | Percentage |")
+        lines.append("|-----------------|-------|------------|")
+        for b in queue_dist["buckets"]:
+            bar = "#" * int(b["percentage"] / 3)
+            lines.append(f"| {b['range']} | {b['count']} | {b['percentage']}% {bar} |")
+        lines.append("")
+        lines.append(
+            f"> **Median:** {_format_duration_seconds(queue_dist['median'])} "
+            f"| **P90:** {_format_duration_seconds(queue_dist['p90'])} "
+            f"| **P99:** {_format_duration_seconds(queue_dist['p99'])}"
+        )
+        lines.append("")
+
+    # --- Failed Jobs Detail (collapsible) ---
+    failed_jobs = [
+        j
+        for j in jobs
+        if j.get("conclusion") == "failure" and not j.get("is_stuck", False)
+    ]
+    if failed_jobs:
+        lines.append("<details>")
+        lines.append(
+            f"<summary><strong>Failed Jobs ({len(failed_jobs)} total)</strong> - Click to expand</summary>"
+        )
+        lines.append("")
+        lines.append(
+            "| Job Name | Runner | Workflow | Queue | Duration | PR/Branch | Link |"
+        )
+        lines.append(
+            "|----------|--------|---------|-------|----------|-----------|------|"
+        )
+        for j in sorted(failed_jobs, key=lambda x: x["created_at"], reverse=True):
+            queue = calculate_queue_time(
+                j["created_at"], j["started_at"], j["status"], report_time
+            )
+            dur = calculate_duration(j["started_at"], j["completed_at"])
+            pr_info = (
+                f"PR#{j['pr_number']}" if j.get("pr_number") else j.get("branch", "-")
+            )
+            url = j.get("html_url", "")
+            wf = j.get("workflow", "-")
+            lines.append(
+                f"| `{j['job_name']}` | `{j['runner_name']}` | `{wf}` "
+                f"| {queue} | {dur} | {pr_info} | [View]({url}) |"
+            )
+        lines.append("")
+        lines.append("</details>")
+        lines.append("")
+
+    # --- Stuck Jobs ---
+    stuck_jobs = [j for j in jobs if j.get("is_stuck", False)]
+    if stuck_jobs:
+        lines.append("## Stuck/Ghost Jobs")
+        lines.append("")
+        lines.append(
+            "> Jobs showing `in_progress` but have no runner assigned or workflow run is cancelled"
+        )
+        lines.append("")
+        lines.append(
+            "| Job Name | Job Status | Run Status | Runner | Workflow | Link |"
+        )
+        lines.append("|----------|-----------|-----------|--------|---------|------|")
+        for j in sorted(stuck_jobs, key=lambda x: x["created_at"], reverse=True):
+            run_info = f"{j.get('run_status', '-')}/{j.get('run_conclusion', '-')}"
+            url = j.get("html_url", "")
+            wf = j.get("workflow", "-")
+            lines.append(
+                f"| `{j['job_name']}` | {j['status']} | {run_info} "
+                f"| `{j['runner_name']}` | `{wf}` | [View]({url}) |"
+            )
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def main():
     # Check gh CLI availability before proceeding
     if not check_gh_cli_available():
@@ -812,13 +1425,14 @@ def main():
     )
     parser.add_argument(
         "--job",
-        required=True,
-        help="Job name filter (e.g., 'stage-c-test-large-8-gpu-amd-mi35x')",
+        required=False,
+        default=None,
+        help="Job name filter (required unless --runner-report is used)",
     )
     parser.add_argument(
         "--workflow",
         default="pr-test-amd.yml",
-        help="Workflow file name (default: pr-test-amd.yml)",
+        help="Workflow file name, or comma-separated list for --runner-report (default: pr-test-amd.yml)",
     )
     parser.add_argument(
         "--hours",
@@ -847,8 +1461,47 @@ def main():
         type=str,
         help="Write output to file",
     )
+    parser.add_argument(
+        "--runner-report",
+        action="store_true",
+        help="Generate runner fleet analytics report across all jobs (no --job filter needed)",
+    )
     args = parser.parse_args()
 
+    if not args.runner_report and not args.job:
+        parser.error("--job is required unless --runner-report is specified")
+
+    # --- Runner fleet report mode ---
+    if args.runner_report:
+        workflows = [w.strip() for w in args.workflow.split(",") if w.strip()]
+        jobs = query_all_jobs(args.repo, workflows, args.hours)
+
+        md_content = format_runner_report_markdown(
+            jobs, workflows, args.hours, report_generated_time, report_time
+        )
+
+        print(md_content)
+
+        if args.output_file:
+            with open(args.output_file, "w") as f:
+                f.write(md_content)
+            print(f"\nOutput written to {args.output_file}", file=sys.stderr)
+
+        if args.summary:
+            summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
+            if summary_file:
+                with open(summary_file, "a") as f:
+                    f.write(md_content)
+                    f.write("\n")
+                print("Summary written to GITHUB_STEP_SUMMARY", file=sys.stderr)
+            else:
+                print(
+                    "Warning: GITHUB_STEP_SUMMARY not set, markdown printed above.",
+                    file=sys.stderr,
+                )
+        return
+
+    # --- Original per-job report mode ---
     results = query_jobs(
         args.repo,
         args.job,
@@ -877,7 +1530,6 @@ def main():
         output_content = "\n".join(lines)
         print(output_content)
     elif args.output == "json":
-        # Add calculated fields to JSON output for consistency
         json_results = []
         for r in sorted(results, key=lambda x: x["created_at"], reverse=True):
             r_copy = r.copy()
@@ -896,13 +1548,11 @@ def main():
         )
         print(output_content)
 
-    # Write to file if specified
     if args.output_file and output_content:
         with open(args.output_file, "w") as f:
             f.write(output_content)
         print(f"\nOutput written to {args.output_file}", file=sys.stderr)
 
-    # Write to GITHUB_STEP_SUMMARY if requested
     if args.summary:
         md_content = format_markdown(
             results, args.repo, args.job, args.hours, report_generated_time, report_time
@@ -912,7 +1562,7 @@ def main():
             with open(summary_file, "a") as f:
                 f.write(md_content)
                 f.write("\n")
-            print(f"Summary written to GITHUB_STEP_SUMMARY", file=sys.stderr)
+            print("Summary written to GITHUB_STEP_SUMMARY", file=sys.stderr)
         else:
             print(
                 "Warning: GITHUB_STEP_SUMMARY not set, printing markdown instead:",
