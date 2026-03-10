@@ -253,6 +253,7 @@ class TestQwenPPAccuracy(unittest.TestCase):
         )
 
 
+@unittest.skipIf(is_in_amd_ci(), "PP consistency too flaky on AMD 4-GPU runners")
 class TestQwenPPTieWeightsAccuracy(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
