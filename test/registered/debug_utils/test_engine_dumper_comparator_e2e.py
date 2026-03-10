@@ -27,7 +27,7 @@ pytestmark = pytest.mark.filterwarnings(
 )
 
 from sglang.srt.utils import kill_process_tree
-from sglang.test.ci.ci_register import register_cuda_ci
+from sglang.test.ci.ci_register import register_amd_ci, register_cuda_ci
 from sglang.test.test_utils import (
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
     DEFAULT_URL_FOR_TEST,
@@ -35,6 +35,7 @@ from sglang.test.test_utils import (
 )
 
 register_cuda_ci(est_time=300, suite="nightly-4-gpu", nightly=True)
+register_amd_ci(est_time=300, suite="nightly-amd-4-gpu", nightly=True)
 
 MODEL = "Qwen/Qwen3-30B-A3B"
 BASELINE_TP = 2

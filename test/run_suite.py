@@ -31,6 +31,7 @@ PER_COMMIT_SUITES = {
         "stage-b-test-large-8-gpu-35x-disaggregation-amd",
         "stage-b-test-large-1-gpu-amd",
         "stage-b-test-large-2-gpu-amd",
+        "stage-c-test-4-gpu-amd",
         "stage-c-test-large-8-gpu-amd",
         "stage-c-test-large-8-gpu-amd-mi35x",
     ],
@@ -82,6 +83,7 @@ NIGHTLY_SUITES = {
         "nightly-amd-1-gpu",
         "nightly-amd-1-gpu-mi35x",
         "nightly-amd-1-gpu-zimage-turbo",
+        "nightly-amd-4-gpu",
         "nightly-amd-8-gpu",
         "nightly-amd-vlm",
         # MI35x 8-GPU suite (different model configs)

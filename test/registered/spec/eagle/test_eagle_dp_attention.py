@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import requests
 
 from sglang.srt.environ import envs
-from sglang.test.ci.ci_register import register_cuda_ci
+from sglang.test.ci.ci_register import register_amd_ci, register_cuda_ci
 from sglang.test.few_shot_gsm8k import run_eval as run_eval_few_shot_gsm8k
 from sglang.test.send_one import BenchArgs, send_one_prompt
 from sglang.test.test_utils import (
@@ -22,6 +22,7 @@ from sglang.test.test_utils import (
 
 # EAGLE3 with DP attention (tp=2, dp=2, requires 4 GPUs)
 register_cuda_ci(est_time=200, suite="stage-c-test-4-gpu-h100")
+register_amd_ci(est_time=200, suite="stage-c-test-4-gpu-amd")
 
 
 class TestEAGLE3EngineDPAttention(CustomTestCase):
@@ -50,7 +51,7 @@ class TestEAGLE3EngineDPAttention(CustomTestCase):
             "--moe-dense-tp-size",
             "1",
             "--attention-backend",
-            "fa3",
+            "triton" if is_in_amd_ci() else "fa3",
             "--mem-fraction-static",
             "0.75",
             "--cuda-graph-max-bs",
