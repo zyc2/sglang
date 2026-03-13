@@ -74,10 +74,9 @@ class TestDPAttentionDP2TP4(
     def setUpClass(cls):
         cls.model = DEFAULT_MLA_MODEL_NAME_FOR_TEST
         cls.base_url = DEFAULT_URL_FOR_TEST
-        tp = "2" if is_in_amd_ci() else "4"
         other_args = [
             "--trust-remote-code",
-            f"--tp={tp}",
+            "--tp=4",
             "--enable-dp-attention",
             "--dp=2",
         ]
@@ -186,11 +185,10 @@ class TestDPAttentionDP2TP4VLM(CustomTestCase):
         cls.model = "Qwen/Qwen3-VL-30B-A3B-Instruct"
         cls.base_url = DEFAULT_URL_FOR_TEST
         cls.image_url = DEFAULT_IMAGE_URL
-        tp = "2" if is_in_amd_ci() else "4"
         other_args = [
             "--trust-remote-code",
             "--tp",
-            tp,
+            "4",
             "--enable-dp-attention",
             "--dp",
             "2",

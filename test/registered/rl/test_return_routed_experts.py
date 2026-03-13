@@ -74,8 +74,8 @@ class TestReturnRoutedExperts(CustomTestCase):
     @classmethod
     def setUpClass(cls):
 
-        tp = 2 if is_in_amd_ci() else 4
-        dp = 2 if is_in_amd_ci() else 4
+        tp = 4
+        dp = 4
         cls.baseline_args = [
             "--enable-return-routed-experts",
             "--enable-deterministic-inference",
