@@ -75,20 +75,16 @@ class TestDPAttentionDP2TP4(
     def setUpClass(cls):
         cls.model = DEFAULT_MLA_MODEL_NAME_FOR_TEST
         cls.base_url = DEFAULT_URL_FOR_TEST
-        tp = "2" if is_in_amd_ci() else "4"
-        other_args = [
-            "--trust-remote-code",
-            f"--tp={tp}",
-            "--enable-dp-attention",
-            "--dp=2",
-        ]
-        other_args.extend(_amd_dp_attention_args())
         cls.process = popen_launch_server(
             cls.model,
             cls.base_url,
             timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
-            other_args=other_args,
-            env=_amd_dp_attention_env(),
+            other_args=[
+                "--trust-remote-code",
+                "--tp=4",
+                "--enable-dp-attention",
+                "--dp=2",
+            ],
         )
 
     @classmethod
@@ -136,16 +132,13 @@ class TestDPAttentionDP2TP2DeepseekV3MTP(
             "--enable-dp-attention",
             "--dp-size=2",
         ]
-        if is_in_amd_ci():
-            other_args.extend(_amd_dp_attention_args())
-        else:
+        if not is_in_amd_ci():
             other_args += ["--mem-frac", "0.7"]
         cls.process = popen_launch_server(
             cls.model,
             cls.base_url,
             timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
             other_args=other_args,
-            env=_amd_dp_attention_env(),
         )
 
     @classmethod
@@ -187,11 +180,10 @@ class TestDPAttentionDP2TP4VLM(CustomTestCase):
         cls.model = "Qwen/Qwen3-VL-30B-A3B-Instruct"
         cls.base_url = DEFAULT_URL_FOR_TEST
         cls.image_url = DEFAULT_IMAGE_URL
-        tp = "2" if is_in_amd_ci() else "4"
         other_args = [
             "--trust-remote-code",
             "--tp",
-            tp,
+            "4",
             "--enable-dp-attention",
             "--dp",
             "2",
