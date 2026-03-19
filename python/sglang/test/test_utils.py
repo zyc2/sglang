@@ -201,13 +201,15 @@ def get_amd_4gpu_env(extra: Optional[dict] = None) -> Optional[dict]:
     if not is_in_amd_ci():
         return None
     env = os.environ.copy()
-    env.update({
-        "NCCL_CUMEM_ENABLE": "0",
-        "NCCL_NVLS_ENABLE": "0",
-        "RCCL_MSCCL_ENABLE": "0",
-        "SGLANG_USE_ROCM700A": "1",
-        "SGLANG_USE_AITER": "0",
-    })
+    env.update(
+        {
+            "NCCL_CUMEM_ENABLE": "0",
+            "NCCL_NVLS_ENABLE": "0",
+            "RCCL_MSCCL_ENABLE": "0",
+            "SGLANG_USE_ROCM700A": "1",
+            "SGLANG_USE_AITER": "0",
+        }
+    )
     if extra:
         env.update(extra)
     return env
@@ -218,10 +220,14 @@ def get_amd_4gpu_server_args(mem_fraction="0.60", timeout="1200") -> list:
     if not is_in_amd_ci():
         return []
     return [
-        "--attention-backend", "triton",
-        "--mem-fraction-static", mem_fraction,
-        "--watchdog-timeout", timeout,
-        "--dist-timeout", timeout,
+        "--attention-backend",
+        "triton",
+        "--mem-fraction-static",
+        mem_fraction,
+        "--watchdog-timeout",
+        timeout,
+        "--dist-timeout",
+        timeout,
         "--disable-custom-all-reduce",
     ]
 

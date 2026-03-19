@@ -39,8 +39,6 @@ AMD_CI_MAX_NEW_TOKENS = 48
 AMD_CI_TIMEOUT = "1200"
 
 
-
-
 class TestReturnRoutedExperts(CustomTestCase):
     # modified from test_hicache.py
     @classmethod
@@ -232,6 +230,7 @@ class TestReturnRoutedExperts(CustomTestCase):
 
 async def make_request(session, url, payload, semaphore=None):
     """Make a single async HTTP request"""
+
     async def _do_request():
         async with session.post(url=url, json=payload) as response:
             return await response.json()

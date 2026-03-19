@@ -38,8 +38,6 @@ register_cuda_ci(est_time=500, suite="stage-c-test-4-gpu-h100")
 register_amd_ci(est_time=500, suite="stage-c-test-4-gpu-amd")
 
 
-
-
 class TestPPAccuracy(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
