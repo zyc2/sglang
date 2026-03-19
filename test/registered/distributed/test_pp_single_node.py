@@ -152,21 +152,23 @@ class TestQwenVLPPAccuracy(unittest.TestCase):
         cls.base_url = "http://127.0.0.1:23333"
         other_args = [
             "--tp-size",
-            "1",
+            1,
             "--pp-size",
-            "4",
+            4,
             "--chunked-prefill-size",
-            "8192",
+            8192,
             "--enable-multimodal",
         ]
+        kwargs = {}
         if is_in_amd_ci():
             other_args.extend(get_amd_4gpu_server_args())
+            kwargs["env"] = get_amd_4gpu_env()
         cls.process = popen_launch_server(
             DEFAULT_MODEL_NAME_FOR_TEST_VL_PP,
             cls.base_url,
             timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
             other_args=other_args,
-            env=get_amd_4gpu_env(extra={"SGLANG_USE_AITER": "0"}),
+            **kwargs,
         )
 
     def test_gsm8k(self):

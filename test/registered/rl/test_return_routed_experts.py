@@ -44,8 +44,6 @@ class TestReturnRoutedExperts(CustomTestCase):
     @classmethod
     def setUpClass(cls):
 
-        tp = 2 if is_in_amd_ci() else 4
-        dp = 2 if is_in_amd_ci() else 4
         cls.baseline_args = [
             "--enable-return-routed-experts",
             "--enable-deterministic-inference",
@@ -53,24 +51,27 @@ class TestReturnRoutedExperts(CustomTestCase):
             "--disable-cuda-graph",
             "--disable-radix-cache",
             "--tp",
-            tp,
+            4,
             "--dp",
-            dp,
+            4,
             "--enable-dp-attention",
         ]
         cls.reference_args = [
             "--enable-return-routed-experts",
             "--enable-deterministic-inference",
             "--tp",
-            tp,
+            4,
             "--dp",
-            dp,
+            4,
             "--enable-dp-attention",
         ]
         cls.sampling_args = {
             "temperature": 0,
         }
-        cls.max_concurrency = AMD_CI_MAX_REQUEST_CONCURRENCY if is_in_amd_ci() else 100
+        if is_in_amd_ci():
+            for args in (cls.baseline_args, cls.reference_args):
+                args[args.index("--tp") + 1] = 2
+                args[args.index("--dp") + 1] = 2
         cls.max_new_tokens = AMD_CI_MAX_NEW_TOKENS if is_in_amd_ci() else 100
         # prepare ShareGPT dataset
         try:
@@ -93,10 +94,7 @@ class TestReturnRoutedExperts(CustomTestCase):
 
         if not cls.texts:
             raise ValueError("No valid texts found in the dataset")
-        if is_in_amd_ci():
-            cls.texts = cls.texts[:AMD_CI_MAX_PROMPTS]
-        else:
-            cls.texts = cls.texts[:100]
+        cls.texts = cls.texts[: AMD_CI_MAX_PROMPTS if is_in_amd_ci() else 100]
         cls._endpoints = [
             (
                 "/generate",
@@ -161,14 +159,17 @@ class TestReturnRoutedExperts(CustomTestCase):
         cls,
         other_args,
     ):
-        server_args = list(other_args)
-        server_args.extend(get_amd_4gpu_server_args(mem_fraction="0.70"))
+        kwargs = {}
+        if is_in_amd_ci():
+            other_args = list(other_args)
+            other_args.extend(get_amd_4gpu_server_args(mem_fraction="0.70"))
+            kwargs["env"] = get_amd_4gpu_env()
         process = popen_launch_server(
             DEFAULT_ENABLE_ROUTED_EXPERTS_MODEL_NAME_FOR_TEST,
             DEFAULT_URL_FOR_TEST,
             timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
-            other_args=server_args,
-            env=get_amd_4gpu_env(),
+            other_args=other_args,
+            **kwargs,
         )
         try:
             return asyncio.run(cls._collect_results_async())
@@ -178,9 +179,14 @@ class TestReturnRoutedExperts(CustomTestCase):
     @classmethod
     async def _collect_results_async(cls):
         results = {}
-        timeout = aiohttp.ClientTimeout(total=300 if is_in_amd_ci() else None)
-        semaphore = asyncio.Semaphore(cls.max_concurrency)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        session_kwargs = {}
+        make_request_extra = {}
+        if is_in_amd_ci():
+            session_kwargs["timeout"] = aiohttp.ClientTimeout(total=300)
+            make_request_extra["semaphore"] = asyncio.Semaphore(
+                AMD_CI_MAX_REQUEST_CONCURRENCY
+            )
+        async with aiohttp.ClientSession(**session_kwargs) as session:
             for endpoint, payload_builder, response_extractor in cls._endpoints:
                 tasks = [
                     asyncio.create_task(
@@ -188,7 +194,7 @@ class TestReturnRoutedExperts(CustomTestCase):
                             session,
                             f"{DEFAULT_URL_FOR_TEST}{endpoint}",
                             payload_builder(text),
-                            semaphore,
+                            **make_request_extra,
                         )
                     )
                     for text in cls.texts
@@ -228,17 +234,15 @@ class TestReturnRoutedExperts(CustomTestCase):
         }
 
 
-async def make_request(session, url, payload, semaphore=None):
+async def make_request(session, url, payload, **kwargs):
     """Make a single async HTTP request"""
-
-    async def _do_request():
-        async with session.post(url=url, json=payload) as response:
-            return await response.json()
-
+    semaphore = kwargs.get("semaphore")
     if semaphore is not None:
         async with semaphore:
-            return await _do_request()
-    return await _do_request()
+            async with session.post(url=url, json=payload) as response:
+                return await response.json()
+    async with session.post(url=url, json=payload) as response:
+        return await response.json()
 
 
 def extract_routed_experts_from_openai_response(response):
