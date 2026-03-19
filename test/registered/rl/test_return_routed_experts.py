@@ -69,9 +69,11 @@ class TestReturnRoutedExperts(CustomTestCase):
             "temperature": 0,
         }
         if is_in_amd_ci():
+            # TP=4 DP=4 produces ~16% routed expert mismatches on AMD; TP=2 DP=2 passes
             for args in (cls.baseline_args, cls.reference_args):
                 args[args.index("--tp") + 1] = 2
                 args[args.index("--dp") + 1] = 2
+        # Reduced tokens on AMD to fit MI325 memory at TP=2 DP=2
         cls.max_new_tokens = AMD_CI_MAX_NEW_TOKENS if is_in_amd_ci() else 100
         # prepare ShareGPT dataset
         try:
