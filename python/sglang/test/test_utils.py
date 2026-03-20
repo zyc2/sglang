@@ -196,9 +196,22 @@ def is_in_amd_ci():
     return get_bool_env_var("SGLANG_IS_IN_CI_AMD")
 
 
+def _cuda_device_is_blackwell_compute() -> bool:
+    try:
+        if not torch.cuda.is_available():
+            return False
+        major, _minor = torch.cuda.get_device_capability(0)
+        # Hopper = 9.x; Blackwell datacenter = 10.x; consumer (e.g. RTX 5090) = 12.x
+        return major >= 10
+    except Exception:
+        return False
+
+
 def is_blackwell_system():
-    """Return whether it is running on a Blackwell (B200) system."""
-    return envs.IS_BLACKWELL.get()
+    """Return True on Blackwell GPUs (compute cap >= 10) or if IS_BLACKWELL is set explicitly."""
+    if "IS_BLACKWELL" in os.environ:
+        return envs.IS_BLACKWELL.get()
+    return _cuda_device_is_blackwell_compute()
 
 
 def is_h200_system():

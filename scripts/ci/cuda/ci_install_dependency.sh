@@ -3,7 +3,30 @@
 set -euxo pipefail
 
 # Set up environment variables
-IS_BLACKWELL=${IS_BLACKWELL:-0}
+# IS_BLACKWELL=1 selects Blackwell-specific install path (pip --break-system-packages).
+# If unset or empty, auto-detect from GPU: Hopper = 9.x, Blackwell datacenter = 10.x, consumer = 12.x → use major >= 10.
+if [ -n "${IS_BLACKWELL+x}" ] && [ -n "${IS_BLACKWELL}" ]; then
+  case "${IS_BLACKWELL}" in
+    1|true|TRUE|yes|YES) IS_BLACKWELL=1 ;;
+    0|false|FALSE|no|NO) IS_BLACKWELL=0 ;;
+    *)
+      echo "WARNING: invalid IS_BLACKWELL='${IS_BLACKWELL}', falling back to auto-detect"
+      IS_BLACKWELL=
+      ;;
+  esac
+fi
+if [ -z "${IS_BLACKWELL}" ]; then
+  IS_BLACKWELL=0
+  CC_MAJOR=""
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    CC_MAJOR=$(nvidia-smi -i 0 --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n1 | cut -d. -f1 | tr -d ' ')
+    if [ -n "${CC_MAJOR}" ] && [ "${CC_MAJOR}" -ge 10 ] 2>/dev/null; then
+      IS_BLACKWELL=1
+    fi
+  fi
+  echo "Auto-detected IS_BLACKWELL=${IS_BLACKWELL} (GPU compute_cap major=${CC_MAJOR:-none})"
+fi
+export IS_BLACKWELL
 CU_VERSION="cu129"
 FLASHINFER_VERSION=0.6.6
 OPTIONAL_DEPS="${1:-}"
