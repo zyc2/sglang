@@ -4,7 +4,6 @@ import os
 import time
 import traceback
 import unittest
-from datetime import timedelta
 from multiprocessing import Process
 from typing import Iterable, Tuple
 
@@ -20,36 +19,21 @@ from sglang.test.test_utils import (
     DEFAULT_SMALL_MODEL_NAME_FOR_TEST_BASE,
     CustomTestCase,
     find_available_port,
-    is_in_amd_ci,
 )
 
 register_cuda_ci(est_time=64, suite="stage-c-test-4-gpu-h100")
 register_amd_ci(
     est_time=64,
     suite="stage-c-test-4-gpu-amd",
-    disabled="Multi-process engine startup crash on AMD (torch_memory_saver incompatible with ROCm)",
+    disabled="torch_memory_saver incompatible with ROCm (libcuda.so.1 not found)",
 )
-
-# TODO: used when test is re-enabled on AMD
-AMD_DIST_TIMEOUT = timedelta(minutes=20)
 
 TEST_SUITE = dict(
     model_path=DEFAULT_SMALL_MODEL_NAME_FOR_TEST,
-    mem_fraction_static=0.60 if is_in_amd_ci() else 0.83,
+    mem_fraction_static=0.83,
     dp_size=2,
     tp_size=2,
 )
-
-
-def _configure_amd_distributed_env():
-    if not is_in_amd_ci():
-        return
-
-    os.environ["NCCL_CUMEM_ENABLE"] = "0"
-    os.environ["NCCL_NVLS_ENABLE"] = "0"
-    os.environ["RCCL_MSCCL_ENABLE"] = "0"
-    os.environ["SGLANG_USE_AITER"] = "0"
-    os.environ["SGLANG_MEMORY_SAVER_CUDA_GRAPH"] = "1"
 
 
 class EngineWrapper:
@@ -73,7 +57,7 @@ class EngineWrapper:
             random_seed=random_seed,
             mem_fraction_static=mem_fraction_static,
             base_gpu_id=base_gpu_id,
-            enable_memory_saver=not is_in_amd_ci(),
+            enable_memory_saver=True,
             tp_size=self._tp_size,
             node_rank=node_rank,
             nnodes=1,
@@ -163,22 +147,12 @@ def _run_sglang_subprocess(
     try:
         os.environ["MASTER_ADDR"] = "localhost"
         os.environ["MASTER_PORT"] = str(master_port)
-        _configure_amd_distributed_env()
-        init_pg_kwargs = dict(
-            backend="nccl",
+        dist.init_process_group(
             rank=rank,
             device_id=torch.device(f"cuda:{rank}"),
             world_size=dp_size * tp_size,
         )
-        if is_in_amd_ci():
-            init_pg_kwargs["timeout"] = AMD_DIST_TIMEOUT
-        dist.init_process_group(**init_pg_kwargs)
         torch.cuda.set_device(rank)
-
-        if is_in_amd_ci():
-            warmup = torch.ones(1, device=torch.cuda.current_device())
-            dist.all_reduce(warmup)
-            dist.barrier()
 
         base_gpu_id = rank // tp_size * tp_size
         mesh_kwargs = dict(
