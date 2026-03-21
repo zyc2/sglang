@@ -10,7 +10,6 @@ Usage:
 """
 
 import argparse
-import json
 import os
 import sys
 import time
@@ -19,7 +18,7 @@ from pathlib import Path
 
 # Reuse GitHub API helpers from publish_traces
 sys.path.insert(0, str(Path(__file__).parent))
-from utils.publish_traces import (
+from publish_traces import (
     create_blobs,
     create_commit,
     create_tree,
