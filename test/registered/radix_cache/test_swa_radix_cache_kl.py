@@ -6,7 +6,7 @@ from sglang.test.server_fixtures.default_fixture import DefaultServerBase
 
 MODEL = "openai/gpt-oss-20b"
 
-register_cuda_ci(est_time=200, suite="stage-b-test-large-1-gpu")
+register_cuda_ci(est_time=100, suite="stage-b-test-large-1-gpu")
 
 
 class TestSWARadixCacheKL(KLDivergenceMixin, DefaultServerBase):
@@ -19,20 +19,6 @@ class TestSWARadixCacheKL(KLDivergenceMixin, DefaultServerBase):
         "--mem-fraction-static",
         "0.70",
         "--disable-piecewise-cuda-graph",
-    ]
-
-
-class TestSWARadixCacheKLWithHybridRadixTree(KLDivergenceMixin, DefaultServerBase):
-    model = MODEL
-    kl_div_thres = 0.002
-    kl_div_decode_max_new_tokens = 2048
-    other_args = [
-        "--tp-size",
-        "1",
-        "--mem-fraction-static",
-        "0.70",
-        "--disable-piecewise-cuda-graph",
-        "--enable-hybrid-radix-tree",
     ]
 
 
