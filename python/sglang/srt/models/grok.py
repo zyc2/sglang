@@ -478,7 +478,7 @@ class Grok1DecoderLayer(nn.Module):
         self.alt_stream = alt_stream or torch.cuda.Stream()
 
         rope_params = getattr(config, "rope_parameters", None)
-        if rope_params is not None:
+        if rope_params and "rope_theta" in rope_params:
             rope_theta = rope_params["rope_theta"]
         else:
             rope_theta = getattr(config, "rope_theta", 10000)
