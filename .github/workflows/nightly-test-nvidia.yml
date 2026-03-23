@@ -635,7 +635,7 @@ jobs:
           PYTHONUNBUFFERED: "1"
         timeout-minutes: 210
         run: |
-          python3 -u -m sglang.multimodal_gen.benchmarks.run_comparison \
+          python3 -u scripts/ci/utils/diffusion/run_comparison.py \
             --output comparison-results.json
 
       - name: Generate dashboard

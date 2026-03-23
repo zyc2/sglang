@@ -5,16 +5,16 @@ single request, measures end-to-end latency, and writes comparison-results.json.
 
 Usage:
     # Full run (requires GPU)
-    python3 -m sglang.multimodal_gen.benchmarks.run_comparison
+    python3 scripts/ci/utils/diffusion/run_comparison.py
 
     # Dry-run (config parsing + command preview only)
-    python3 -m sglang.multimodal_gen.benchmarks.run_comparison --dry-run
+    python3 scripts/ci/utils/diffusion/run_comparison.py --dry-run
 
     # Run only specific case(s)
-    python3 -m sglang.multimodal_gen.benchmarks.run_comparison --case-ids flux1_dev_t2i_1024
+    python3 scripts/ci/utils/diffusion/run_comparison.py --case-ids flux1_dev_t2i_1024
 
     # Run only specific framework(s)
-    python3 -m sglang.multimodal_gen.benchmarks.run_comparison --frameworks sglang
+    python3 scripts/ci/utils/diffusion/run_comparison.py --frameworks sglang
 """
 
 import argparse
@@ -37,13 +37,7 @@ import requests
 # Constants
 # ---------------------------------------------------------------------------
 CONFIGS_PATH = Path(__file__).parent / "comparison_configs.json"
-INSTALL_SCRIPT = (
-    Path(__file__).parents[4]
-    / "scripts"
-    / "ci"
-    / "utils"
-    / "install_comparison_frameworks.sh"
-)
+INSTALL_SCRIPT = Path(__file__).parents[1] / "install_comparison_frameworks.sh"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 30000
 HEALTH_TIMEOUT = (
@@ -243,7 +237,7 @@ def wait_for_health(
     print(f"  Server ready in {elapsed:.1f}s")
 
 
-KILLALL_SCRIPT = Path(__file__).parents[4] / "scripts" / "killall_sglang.sh"
+KILLALL_SCRIPT = Path(__file__).parents[3] / "killall_sglang.sh"
 
 
 def kill_server(proc: subprocess.Popen) -> None:
